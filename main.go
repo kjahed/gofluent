@@ -129,21 +129,21 @@ func (b *{{ .TypeName }}Builder) Build() *{{ qualifiedName . }} {
 `
 
 	withFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) With{{ .FieldName }}(a .ValType) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) With{{ .FieldName }}(a {{ .ValType }}) *{{ .StructName }}Builder {
 	b.s.{{ .FieldName }} = a
 	return b
 }
 	`
 
 	addFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) Add{{ .FieldName }}(a .ValType.SliceValType) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) Add{{ .FieldName }}(a {{ .ValType.SliceValType }}) *{{ .StructName }}Builder {
 	b.s.{{ .FieldName }} = append(b.s.{{ .FieldName }}, a)
 	return b
 }
 	`
 
 	putFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) Put{{ .FieldName }}(k .ValType.MapKeyType, v .ValType.MapValType) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) Put{{ .FieldName }}(k {{ .ValType.MapKeyType }}, v {{ .ValType.MapValType }}) *{{ .StructName }}Builder {
 	b.s.{{ .FieldName }}[k] = v
 	return b
 }
@@ -264,6 +264,25 @@ func main() {
 	err = builderTmplt.Execute(&buff, sAttr)
 	if err != nil {
 		die(err.Error())
+	}
+
+	for _, sf := range sAttr.StructFields {
+		err = withFuncTmplt.Execute(&buff, sf)
+		if err != nil {
+			die(err.Error())
+		}
+
+		if sf.ValType.IsSlice {
+			err = addFuncTmplt.Execute(&buff, sf)
+			if err != nil {
+				die(err.Error())
+			}
+		} else if sf.ValType.IsMap {
+			err = putFuncTmplt.Execute(&buff, sf)
+			if err != nil {
+				die(err.Error())
+			}
+		}
 	}
 
 	os.WriteFile(filepath.Join(*outputDir, "fluent.go"), buff.Bytes(), 0644)
