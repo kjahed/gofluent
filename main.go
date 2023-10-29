@@ -324,7 +324,11 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 		tAttr := &typeAttr{}
 		fillTypeAttr(pkg, f.Type, tAttr)
 
-		if len(f.Names) == 0 && isNameExported(sAttr.TypeName) {
+		if !isNameExported(sAttr.TypeName) {
+			continue
+		}
+
+		if len(f.Names) == 0 {
 			sAttr.StructFields = append(sAttr.StructFields, &fieldAttr{
 				StructName: sAttr.TypeName,
 				FieldName:  tAttr.TypeName,
