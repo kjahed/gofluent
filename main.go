@@ -76,6 +76,11 @@ func (t *typeAttr) String() string {
 
 		s += "func(" + params + ")" + "(" + results + ")"
 	} else {
+		if t.PkgPath != "" {
+			if pkgPrefix, ok := pkgKeys[t.PkgPath]; ok {
+				s += pkgPrefix + "."
+			}
+		}
 		s += t.TypeName
 	}
 	return s
@@ -157,7 +162,10 @@ var (
 	addFuncTmplt  *template.Template
 	putFuncTmplt  *template.Template
 
-	pkgKeys map[string]string
+	pkgs          []*packages.Package
+	pkgKeys       map[string]string
+	pkgLoadConfig *packages.Config
+	loadedPkgs    map[string]bool
 )
 
 func init() {
@@ -197,6 +205,12 @@ func init() {
 	if err != nil {
 		die(err.Error())
 	}
+
+	pkgLoadConfig = new(packages.Config)
+	pkgLoadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo
+	pkgLoadConfig.Fset = token.NewFileSet()
+	loadedPkgs = map[string]bool{}
+	pkgs = []*packages.Package{}
 }
 
 func die(format string, a ...any) {
@@ -212,15 +226,8 @@ func prettyPrint(i interface{}) string {
 func main() {
 	flag.Parse()
 
-	loadConfig := new(packages.Config)
-	loadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo
-	loadConfig.Fset = token.NewFileSet()
-	pkgs, err := packages.Load(loadConfig, *inPkg)
-	if err != nil {
-		die(err.Error())
-	}
-
-	pkg, ts := findStruct(pkgs, *targetStruct)
+	loadPkgs(*inPkg)
+	pkg, ts := findStruct(*targetStruct)
 	if ts == nil {
 		die("Struct %s not found\n", *targetStruct)
 	}
@@ -237,11 +244,11 @@ func main() {
 		StructFields: []*fieldAttr{},
 	}
 
-	fillStructAttr(pkgs, pkg, st, sAttr)
+	fillStructAttr(pkg, st, sAttr)
 
 	fmt.Println(prettyPrint(sAttr))
 
-	imports := collectPackages(sAttr)
+	imports := collectImports()
 	pkgKeys = make(map[string]string)
 	for k, v := range imports {
 		pkgKeys[v] = k
@@ -250,36 +257,31 @@ func main() {
 	os.MkdirAll(*outputDir, os.ModePerm)
 
 	var buff bytes.Buffer
-	err = preambleTmplt.Execute(&buff, struct {
+	if err := preambleTmplt.Execute(&buff, struct {
 		OutPkgName string
 		Imports    *map[string]string
 	}{
 		OutPkgName: *outputPkg,
 		Imports:    &imports,
-	})
-	if err != nil {
+	}); err != nil {
 		die(err.Error())
 	}
 
-	err = builderTmplt.Execute(&buff, sAttr)
-	if err != nil {
+	if err := builderTmplt.Execute(&buff, sAttr); err != nil {
 		die(err.Error())
 	}
 
 	for _, sf := range sAttr.StructFields {
-		err = withFuncTmplt.Execute(&buff, sf)
-		if err != nil {
+		if err := withFuncTmplt.Execute(&buff, sf); err != nil {
 			die(err.Error())
 		}
 
 		if sf.ValType.IsSlice {
-			err = addFuncTmplt.Execute(&buff, sf)
-			if err != nil {
+			if err := addFuncTmplt.Execute(&buff, sf); err != nil {
 				die(err.Error())
 			}
 		} else if sf.ValType.IsMap {
-			err = putFuncTmplt.Execute(&buff, sf)
-			if err != nil {
+			if err := putFuncTmplt.Execute(&buff, sf); err != nil {
 				die(err.Error())
 			}
 		}
@@ -288,13 +290,26 @@ func main() {
 	os.WriteFile(filepath.Join(*outputDir, "fluent.go"), buff.Bytes(), 0644)
 
 	fmt.Println(buff.String())
-
 }
 
-func fillStructAttr(pkgs []*packages.Package, pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) {
+func loadPkgs(path ...string) {
+	ps, err := packages.Load(pkgLoadConfig, path...)
+	if err != nil {
+		die(err.Error())
+	}
+
+	for _, p := range ps {
+		if _, ok := loadedPkgs[p.ID]; !ok {
+			pkgs = append(pkgs, p)
+			loadedPkgs[p.ID] = true
+		}
+	}
+
+}
+func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) {
 	for _, f := range st.Fields.List {
 		tAttr := &typeAttr{}
-		fillTypeAttr(pkgs, pkg, f.Type, tAttr)
+		fillTypeAttr(pkg, f.Type, tAttr)
 
 		if len(f.Names) == 0 {
 			sAttr.StructFields = append(sAttr.StructFields, &fieldAttr{
@@ -314,23 +329,23 @@ func fillStructAttr(pkgs []*packages.Package, pkg *packages.Package, st *ast.Str
 	}
 }
 
-func fillTypeAttr(pkgs []*packages.Package, pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
+func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
 	switch t := tExpr.(type) {
 	case *ast.Ident:
 		tAttr.TypeName = t.Name
 	case *ast.StarExpr:
 		tAttr.IsPtr = true
-		fillTypeAttr(pkgs, pkg, t.X, tAttr)
+		fillTypeAttr(pkg, t.X, tAttr)
 	case *ast.ArrayType:
 		tAttr.IsSlice = true
 		tAttr.SliceValType = &typeAttr{}
-		fillTypeAttr(pkgs, pkg, t.Elt, tAttr.SliceValType)
+		fillTypeAttr(pkg, t.Elt, tAttr.SliceValType)
 	case *ast.MapType:
 		tAttr.IsMap = true
 		tAttr.MapKeyType = &typeAttr{}
 		tAttr.MapValType = &typeAttr{}
-		fillTypeAttr(pkgs, pkg, t.Key, tAttr.MapKeyType)
-		fillTypeAttr(pkgs, pkg, t.Value, tAttr.MapValType)
+		fillTypeAttr(pkg, t.Key, tAttr.MapKeyType)
+		fillTypeAttr(pkg, t.Value, tAttr.MapValType)
 	case *ast.FuncType:
 		tAttr.IsFunc = true
 		tAttr.FuncParamTypes = []*typeAttr{}
@@ -338,35 +353,39 @@ func fillTypeAttr(pkgs []*packages.Package, pkg *packages.Package, tExpr ast.Exp
 
 		for _, p := range t.Params.List {
 			pAttr := &typeAttr{}
-			fillTypeAttr(pkgs, pkg, p.Type, pAttr)
+			fillTypeAttr(pkg, p.Type, pAttr)
 			tAttr.FuncParamTypes = append(tAttr.FuncParamTypes, pAttr)
 		}
 
 		if t.Results != nil {
 			for _, p := range t.Results.List {
 				pAttr := &typeAttr{}
-				fillTypeAttr(pkgs, pkg, p.Type, pAttr)
+				fillTypeAttr(pkg, p.Type, pAttr)
 				tAttr.FuncResultTypes = append(tAttr.FuncResultTypes, pAttr)
 			}
 		}
 	}
 
 	if nt, ok := pkg.TypesInfo.Types[tExpr].Type.(*types.Named); ok {
+		tAttr.PkgPath = nt.Obj().Pkg().Path()
+		if _, ok := loadedPkgs[tAttr.PkgPath]; !ok {
+			loadPkgs(tAttr.PkgPath)
+		}
+
 		if _, ok := nt.Underlying().(*types.Struct); ok {
 			tAttr.IsStruct = true
-			p, ts := findStruct(pkgs, nt.Obj().Name())
+			p, ts := findStruct(nt.Obj().Name())
 			if ts != nil {
 				tAttr.TypeName = nt.Obj().Name()
-				tAttr.PkgPath = p.ID
 				tAttr.StructFields = []*fieldAttr{}
 				st := ts.Type.(*ast.StructType)
-				fillStructAttr(pkgs, p, st, tAttr)
+				fillStructAttr(p, st, tAttr)
 			}
 		}
 	}
 }
 
-func findStruct(pkgs []*packages.Package, structName string) (*packages.Package, *ast.TypeSpec) {
+func findStruct(structName string) (*packages.Package, *ast.TypeSpec) {
 	for _, pkg := range pkgs {
 		for _, syn := range pkg.Syntax {
 			for _, f := range syn.Decls {
@@ -388,10 +407,18 @@ func findStruct(pkgs []*packages.Package, structName string) (*packages.Package,
 	return nil, nil
 }
 
-func collectPackages(t *typeAttr) map[string]string {
+func collectImports() map[string]string {
 	ret := map[string]string{}
 	m := map[string]map[string]bool{}
-	collectPkgsHelper(t, &m)
+	for v := range loadedPkgs {
+		pkgParts := strings.Split(v, "/")
+		pkgKey := pkgParts[len(pkgParts)-1]
+		if _, ok := m[pkgKey]; !ok {
+			m[pkgKey] = map[string]bool{}
+		}
+		m[pkgKey][v] = true
+	}
+
 	for pkgKey, pkgs := range m {
 		i := 0
 		for pkgPath := range pkgs {
@@ -400,24 +427,8 @@ func collectPackages(t *typeAttr) map[string]string {
 			} else {
 				ret[pkgKey] = pkgPath
 			}
+			i++
 		}
 	}
 	return ret
-}
-
-func collectPkgsHelper(t *typeAttr, m *map[string]map[string]bool) {
-	mp := *m
-	pkgParts := strings.Split(t.PkgPath, "/")
-	pkgKey := pkgParts[len(pkgParts)-1]
-
-	if _, ok := mp[pkgKey]; !ok {
-		mp[pkgKey] = map[string]bool{}
-	}
-	mp[pkgKey][t.PkgPath] = true
-
-	for _, fa := range t.StructFields {
-		if fa.ValType.IsStruct {
-			collectPkgsHelper(fa.ValType, m)
-		}
-	}
 }
