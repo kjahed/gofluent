@@ -20,7 +20,7 @@ import (
 var (
 	inPkgs       = flag.String("inPkgs", "", "Go package to generate API for seperated by a comma")
 	targetStruct = flag.String("structName", "", "Go struct to generate API for")
-	outputDir    = flag.String("outDir", "", "Output directory for the generated files")
+	outputFile   = flag.String("outFile", "", "Go file for generated API")
 	outputPkg    = flag.String("outPkg", "", "Output package name for the generated files")
 )
 
@@ -249,7 +249,6 @@ func main() {
 
 		toGenerate = append(toGenerate, sAttr)
 		fillStructAttr(es.Pkg, es.TypeSpec, sAttr)
-		fmt.Println(prettyPrint(sAttr))
 	}
 
 	imports := collectImports()
@@ -258,7 +257,8 @@ func main() {
 		pkgKeys[v] = k
 	}
 
-	os.MkdirAll(*outputDir, os.ModePerm)
+	outDir := filepath.Dir(*outputFile)
+	os.MkdirAll(outDir, os.ModePerm)
 
 	var buff bytes.Buffer
 	if err := preambleTmplt.Execute(&buff, struct {
@@ -293,8 +293,9 @@ func main() {
 		}
 	}
 
-	os.WriteFile(filepath.Join(*outputDir, "fluent.go"), buff.Bytes(), 0644)
-	fmt.Println(buff.String())
+	if err := os.WriteFile(*outputFile, buff.Bytes(), 0644); err != nil {
+		die(err.Error())
+	}
 }
 
 func loadPkgs(path ...string) {
@@ -311,6 +312,7 @@ func loadPkgs(path ...string) {
 	}
 
 }
+
 func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) {
 	for _, f := range st.Fields.List {
 		tAttr := &typeAttr{}
