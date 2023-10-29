@@ -368,19 +368,9 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
 
 	if nt, ok := pkg.TypesInfo.Types[tExpr].Type.(*types.Named); ok {
 		tAttr.PkgPath = nt.Obj().Pkg().Path()
+		tAttr.TypeName = nt.Obj().Name()
 		if _, ok := loadedPkgs[tAttr.PkgPath]; !ok {
 			loadPkgs(tAttr.PkgPath)
-		}
-
-		if _, ok := nt.Underlying().(*types.Struct); ok {
-			tAttr.IsStruct = true
-			p, ts := findStruct(nt.Obj().Name())
-			if ts != nil {
-				tAttr.TypeName = nt.Obj().Name()
-				tAttr.StructFields = []*fieldAttr{}
-				st := ts.Type.(*ast.StructType)
-				fillStructAttr(p, st, tAttr)
-			}
 		}
 	}
 }
