@@ -12,12 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"unicode"
 
 	"golang.org/x/tools/go/packages"
 )
 
 var (
-	inPkg        = flag.String("inPkg", "", "Go package to generate API for")
+	inPkgs       = flag.String("inPkgs", "", "Go package to generate API for seperated by a comma")
 	targetStruct = flag.String("structName", "", "Go struct to generate API for")
 	outputDir    = flag.String("outDir", "", "Output directory for the generated files")
 	outputPkg    = flag.String("outPkg", "", "Output package name for the generated files")
@@ -44,6 +45,12 @@ type (
 		StructName string
 		FieldName  string
 		ValType    *typeAttr
+	}
+
+	structAttr struct {
+		Pkg        *packages.Package
+		TypeSpec   *ast.StructType
+		StructName string
 	}
 )
 
@@ -166,6 +173,7 @@ var (
 	pkgKeys       map[string]string
 	pkgLoadConfig *packages.Config
 	loadedPkgs    map[string]bool
+	targetPkgs    []string
 )
 
 func init() {
@@ -225,28 +233,24 @@ func prettyPrint(i interface{}) string {
 
 func main() {
 	flag.Parse()
+	targetPkgs = strings.Split(*inPkgs, ",")
+	loadPkgs(targetPkgs...)
 
-	loadPkgs(*inPkg)
-	pkg, ts := findStruct(*targetStruct)
-	if ts == nil {
-		die("Struct %s not found\n", *targetStruct)
+	exportedStructs := findExportedStructs()
+	toGenerate := []*typeAttr{}
+
+	for _, es := range exportedStructs {
+		sAttr := &typeAttr{
+			TypeName:     es.StructName,
+			PkgPath:      es.Pkg.ID,
+			IsStruct:     true,
+			StructFields: []*fieldAttr{},
+		}
+
+		toGenerate = append(toGenerate, sAttr)
+		fillStructAttr(es.Pkg, es.TypeSpec, sAttr)
+		fmt.Println(prettyPrint(sAttr))
 	}
-
-	st, ok := ts.Type.(*ast.StructType)
-	if !ok {
-		die("Type %s is not a struct\n", ts.Name.Name)
-	}
-
-	sAttr := &typeAttr{
-		TypeName:     ts.Name.Name,
-		PkgPath:      pkg.ID,
-		IsStruct:     true,
-		StructFields: []*fieldAttr{},
-	}
-
-	fillStructAttr(pkg, st, sAttr)
-
-	fmt.Println(prettyPrint(sAttr))
 
 	imports := collectImports()
 	pkgKeys = make(map[string]string)
@@ -267,28 +271,29 @@ func main() {
 		die(err.Error())
 	}
 
-	if err := builderTmplt.Execute(&buff, sAttr); err != nil {
-		die(err.Error())
-	}
-
-	for _, sf := range sAttr.StructFields {
-		if err := withFuncTmplt.Execute(&buff, sf); err != nil {
+	for _, s := range toGenerate {
+		if err := builderTmplt.Execute(&buff, s); err != nil {
 			die(err.Error())
 		}
 
-		if sf.ValType.IsSlice {
-			if err := addFuncTmplt.Execute(&buff, sf); err != nil {
+		for _, sf := range s.StructFields {
+			if err := withFuncTmplt.Execute(&buff, sf); err != nil {
 				die(err.Error())
 			}
-		} else if sf.ValType.IsMap {
-			if err := putFuncTmplt.Execute(&buff, sf); err != nil {
-				die(err.Error())
+
+			if sf.ValType.IsSlice {
+				if err := addFuncTmplt.Execute(&buff, sf); err != nil {
+					die(err.Error())
+				}
+			} else if sf.ValType.IsMap {
+				if err := putFuncTmplt.Execute(&buff, sf); err != nil {
+					die(err.Error())
+				}
 			}
 		}
 	}
 
 	os.WriteFile(filepath.Join(*outputDir, "fluent.go"), buff.Bytes(), 0644)
-
 	fmt.Println(buff.String())
 }
 
@@ -311,7 +316,7 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 		tAttr := &typeAttr{}
 		fillTypeAttr(pkg, f.Type, tAttr)
 
-		if len(f.Names) == 0 {
+		if len(f.Names) == 0 && isNameExported(sAttr.TypeName) {
 			sAttr.StructFields = append(sAttr.StructFields, &fieldAttr{
 				StructName: sAttr.TypeName,
 				FieldName:  tAttr.TypeName,
@@ -319,11 +324,13 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 			})
 		} else {
 			for _, n := range f.Names {
-				sAttr.StructFields = append(sAttr.StructFields, &fieldAttr{
-					StructName: sAttr.TypeName,
-					FieldName:  n.Name,
-					ValType:    tAttr,
-				})
+				if isNameExported(n.Name) {
+					sAttr.StructFields = append(sAttr.StructFields, &fieldAttr{
+						StructName: sAttr.TypeName,
+						FieldName:  n.Name,
+						ValType:    tAttr,
+					})
+				}
 			}
 		}
 	}
@@ -377,7 +384,8 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
 	}
 }
 
-func findStruct(structName string) (*packages.Package, *ast.TypeSpec) {
+func findExportedStructs() []*structAttr {
+	structs := []*structAttr{}
 	for _, pkg := range pkgs {
 		for _, syn := range pkg.Syntax {
 			for _, f := range syn.Decls {
@@ -388,15 +396,20 @@ func findStruct(structName string) (*packages.Package, *ast.TypeSpec) {
 
 				for _, s := range gd.Specs {
 					ts, ok := s.(*ast.TypeSpec)
-					if ok && ts.Name.Name == structName {
-						return pkg, ts
+					if ok && isNameExported(ts.Name.Name) {
+						if st, ok := ts.Type.(*ast.StructType); ok {
+							structs = append(structs, &structAttr{
+								StructName: ts.Name.Name,
+								Pkg:        pkg,
+								TypeSpec:   st,
+							})
+						}
 					}
 				}
 			}
 		}
 	}
-
-	return nil, nil
+	return structs
 }
 
 func collectImports() map[string]string {
@@ -423,4 +436,8 @@ func collectImports() map[string]string {
 		}
 	}
 	return ret
+}
+
+func isNameExported(n string) bool {
+	return len(n) > 0 && unicode.IsUpper(rune(n[0]))
 }
