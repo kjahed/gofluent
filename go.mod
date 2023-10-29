@@ -1,6 +1,6 @@
 module github.com/kjahed/gofluent
 
-go 1.21.3
+go 1.19
 
 require golang.org/x/tools v0.14.0
 
