@@ -18,10 +18,8 @@ import (
 )
 
 var (
-	inPkgs       = flag.String("inPkgs", "", "Go package to generate API for seperated by a comma")
-	targetStruct = flag.String("structName", "", "Go struct to generate API for")
-	outputFile   = flag.String("outFile", "", "Go file for generated API")
-	outputPkg    = flag.String("outPkg", "", "Output package name for the generated files")
+	inPkgs     = flag.String("pkgs", "", "Go packages containing the structs to generate the API for")
+	outputFile = flag.String("out", "", "Output go file path for the generated API")
 )
 
 type (
@@ -181,7 +179,7 @@ func init() {
 
 	preambleTmplt, err = template.New("preambleTmplt").Parse(preambleTmpltStr)
 	if err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	builderTmplt, err = template.New("builderTmplt").Funcs(template.FuncMap{
@@ -196,22 +194,22 @@ func init() {
 		},
 	}).Parse(builderTmpltStr)
 	if err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	withFuncTmplt, err = template.New("withFuncTmplt").Parse(withFuncTmpltStr)
 	if err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	addFuncTmplt, err = template.New("addFuncTmplt").Parse(addFuncTmpltStr)
 	if err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	putFuncTmplt, err = template.New("putFuncTmplt").Parse(putFuncTmpltStr)
 	if err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	pkgLoadConfig = new(packages.Config)
@@ -233,6 +231,13 @@ func prettyPrint(i interface{}) string {
 
 func main() {
 	flag.Parse()
+	if *inPkgs == "" {
+		die("missing required -pkgs arg\n")
+	}
+	if *outputFile == "" {
+		die("missing required -out arg\n")
+	}
+
 	targetPkgs = strings.Split(*inPkgs, ",")
 	loadPkgs(targetPkgs...)
 
@@ -258,6 +263,7 @@ func main() {
 	}
 
 	outDir := filepath.Dir(*outputFile)
+	outPkg := filepath.Base(outDir)
 	os.MkdirAll(outDir, os.ModePerm)
 
 	var buff bytes.Buffer
@@ -265,43 +271,43 @@ func main() {
 		OutPkgName string
 		Imports    *map[string]string
 	}{
-		OutPkgName: *outputPkg,
+		OutPkgName: outPkg,
 		Imports:    &imports,
 	}); err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	for _, s := range toGenerate {
 		if err := builderTmplt.Execute(&buff, s); err != nil {
-			die(err.Error())
+			die("%v\n", err)
 		}
 
 		for _, sf := range s.StructFields {
 			if err := withFuncTmplt.Execute(&buff, sf); err != nil {
-				die(err.Error())
+				die("%v\n", err)
 			}
 
 			if sf.ValType.IsSlice {
 				if err := addFuncTmplt.Execute(&buff, sf); err != nil {
-					die(err.Error())
+					die("%v\n", err)
 				}
 			} else if sf.ValType.IsMap {
 				if err := putFuncTmplt.Execute(&buff, sf); err != nil {
-					die(err.Error())
+					die("%v\n", err)
 				}
 			}
 		}
 	}
 
 	if err := os.WriteFile(*outputFile, buff.Bytes(), 0644); err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 }
 
 func loadPkgs(path ...string) {
 	ps, err := packages.Load(pkgLoadConfig, path...)
 	if err != nil {
-		die(err.Error())
+		die("%v\n", err)
 	}
 
 	for _, p := range ps {
