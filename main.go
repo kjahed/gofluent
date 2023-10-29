@@ -367,10 +367,12 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
 	}
 
 	if nt, ok := pkg.TypesInfo.Types[tExpr].Type.(*types.Named); ok {
-		tAttr.PkgPath = nt.Obj().Pkg().Path()
 		tAttr.TypeName = nt.Obj().Name()
-		if _, ok := loadedPkgs[tAttr.PkgPath]; !ok {
-			loadPkgs(tAttr.PkgPath)
+		if nt.Obj().Pkg() != nil {
+			tAttr.PkgPath = nt.Obj().Pkg().Path()
+			if _, ok := loadedPkgs[tAttr.PkgPath]; !ok {
+				loadPkgs(tAttr.PkgPath)
+			}
 		}
 	}
 }
