@@ -171,6 +171,7 @@ var (
 	pkgKeys       map[string]string
 	pkgLoadConfig *packages.Config
 	loadedPkgs    map[string]bool
+	neededPkgs    map[string]bool
 	targetPkgs    []string
 )
 
@@ -216,6 +217,7 @@ func init() {
 	pkgLoadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo
 	pkgLoadConfig.Fset = token.NewFileSet()
 	loadedPkgs = map[string]bool{}
+	neededPkgs = map[string]bool{}
 	pkgs = []*packages.Package{}
 }
 
@@ -251,7 +253,7 @@ func main() {
 			IsStruct:     true,
 			StructFields: []*fieldAttr{},
 		}
-
+		neededPkgs[es.Pkg.ID] = true
 		toGenerate = append(toGenerate, sAttr)
 		fillStructAttr(es.Pkg, es.TypeSpec, sAttr)
 	}
@@ -322,9 +324,7 @@ func loadPkgs(path ...string) {
 func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) {
 	for _, f := range st.Fields.List {
 		tAttr := &typeAttr{}
-		fillTypeAttr(pkg, f.Type, tAttr)
-
-		if !isNameExported(sAttr.TypeName) {
+		if !fillTypeAttr(pkg, f.Type, tAttr) {
 			continue
 		}
 
@@ -334,6 +334,10 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 				FieldName:  tAttr.TypeName,
 				ValType:    tAttr,
 			})
+
+			if tAttr.PkgPath != "" {
+				neededPkgs[tAttr.PkgPath] = true
+			}
 		} else {
 			for _, n := range f.Names {
 				if isNameExported(n.Name) {
@@ -342,29 +346,41 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 						FieldName:  n.Name,
 						ValType:    tAttr,
 					})
+
+					if tAttr.PkgPath != "" {
+						neededPkgs[tAttr.PkgPath] = true
+					}
 				}
 			}
 		}
 	}
 }
 
-func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
+func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) bool {
 	switch t := tExpr.(type) {
 	case *ast.Ident:
 		tAttr.TypeName = t.Name
 	case *ast.StarExpr:
 		tAttr.IsPtr = true
-		fillTypeAttr(pkg, t.X, tAttr)
+		if !fillTypeAttr(pkg, t.X, tAttr) {
+			return false
+		}
 	case *ast.ArrayType:
 		tAttr.IsSlice = true
 		tAttr.SliceValType = &typeAttr{}
-		fillTypeAttr(pkg, t.Elt, tAttr.SliceValType)
+		if !fillTypeAttr(pkg, t.Elt, tAttr.SliceValType) {
+			return false
+		}
 	case *ast.MapType:
 		tAttr.IsMap = true
 		tAttr.MapKeyType = &typeAttr{}
 		tAttr.MapValType = &typeAttr{}
-		fillTypeAttr(pkg, t.Key, tAttr.MapKeyType)
-		fillTypeAttr(pkg, t.Value, tAttr.MapValType)
+		if !fillTypeAttr(pkg, t.Key, tAttr.MapKeyType) {
+			return false
+		}
+		if !fillTypeAttr(pkg, t.Value, tAttr.MapValType) {
+			return false
+		}
 	case *ast.FuncType:
 		tAttr.IsFunc = true
 		tAttr.FuncParamTypes = []*typeAttr{}
@@ -372,14 +388,18 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
 
 		for _, p := range t.Params.List {
 			pAttr := &typeAttr{}
-			fillTypeAttr(pkg, p.Type, pAttr)
+			if !fillTypeAttr(pkg, p.Type, pAttr) {
+				return false
+			}
 			tAttr.FuncParamTypes = append(tAttr.FuncParamTypes, pAttr)
 		}
 
 		if t.Results != nil {
 			for _, p := range t.Results.List {
 				pAttr := &typeAttr{}
-				fillTypeAttr(pkg, p.Type, pAttr)
+				if !fillTypeAttr(pkg, p.Type, pAttr) {
+					return false
+				}
 				tAttr.FuncResultTypes = append(tAttr.FuncResultTypes, pAttr)
 			}
 		}
@@ -387,13 +407,23 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) {
 
 	if nt, ok := pkg.TypesInfo.Types[tExpr].Type.(*types.Named); ok {
 		tAttr.TypeName = nt.Obj().Name()
+		if !isNameExported(tAttr.TypeName) {
+			return false
+		}
+
 		if nt.Obj().Pkg() != nil {
 			tAttr.PkgPath = nt.Obj().Pkg().Path()
+			if isInternalPkg(tAttr.PkgPath) {
+				return false
+			}
+
 			if _, ok := loadedPkgs[tAttr.PkgPath]; !ok {
 				loadPkgs(tAttr.PkgPath)
 			}
 		}
 	}
+
+	return true
 }
 
 func findExportedStructs() []*structAttr {
@@ -427,7 +457,7 @@ func findExportedStructs() []*structAttr {
 func collectImports() map[string]string {
 	ret := map[string]string{}
 	m := map[string]map[string]bool{}
-	for v := range loadedPkgs {
+	for v := range neededPkgs {
 		pkgParts := strings.Split(v, "/")
 		pkgKey := pkgParts[len(pkgParts)-1]
 		if _, ok := m[pkgKey]; !ok {
@@ -452,4 +482,8 @@ func collectImports() map[string]string {
 
 func isNameExported(n string) bool {
 	return len(n) > 0 && unicode.IsUpper(rune(n[0]))
+}
+
+func isInternalPkg(p string) bool {
+	return strings.Contains(p, "/internal/")
 }
