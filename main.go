@@ -18,9 +18,8 @@ import (
 )
 
 var (
-	inPkgsFlag         = flag.String("pkgs", "", "Go packages containing the structs to generate the API for")
-	outputDirFlag      = flag.String("out", "", "Output dir/pkg for the generated API")
-	augmentStructsFlag = flag.Bool("augment", false, "Augment structs instead of generating builders")
+	inPkgsFlag    = flag.String("pkgs", "", "Go packages containing the structs to generate the API for")
+	outputDirFlag = flag.String("out", "", "Output dir/pkg for the generated API")
 )
 
 type (
@@ -268,12 +267,6 @@ func main() {
 	}
 
 	for _, ss := range toGenerate {
-		imports := collectImports(ss)
-		pkgKeys = make(map[string]string)
-		for k, v := range imports {
-			pkgKeys[v] = k
-		}
-
 		var outDir, outPkg, outFile string
 		if *outputDirFlag != "" {
 			outDir = filepath.Dir(*outputDirFlag)
@@ -283,6 +276,12 @@ func main() {
 			outPkg = ss[0].PkgName
 		}
 		outFile = ss[0].PkgName + "_fluent.go"
+
+		imports := collectImports(ss)
+		pkgKeys = make(map[string]string)
+		for k, v := range imports {
+			pkgKeys[v] = k
+		}
 
 		os.MkdirAll(outDir, os.ModePerm)
 
