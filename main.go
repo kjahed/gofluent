@@ -33,12 +33,14 @@ type (
 		IsMap           bool
 		IsStruct        bool
 		IsFunc          bool
+		IsIntf          bool
 		SliceValType    *typeAttr
 		MapKeyType      *typeAttr
 		MapValType      *typeAttr
 		FuncParamTypes  []*typeAttr
 		FuncResultTypes []*typeAttr
 		StructFields    []*fieldAttr
+		Implementations []*typeAttr
 	}
 
 	fieldAttr struct {
@@ -174,7 +176,6 @@ var (
 	pkgKeys       map[string]string
 	pkgLoadConfig *packages.Config
 	loadedPkgs    map[string]bool
-	neededPkgs    map[string]bool
 	targetPkgs    []string
 )
 
@@ -217,10 +218,9 @@ func init() {
 	}
 
 	pkgLoadConfig = new(packages.Config)
-	pkgLoadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedName
+	pkgLoadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesSizes | packages.NeedTypesInfo | packages.NeedName | packages.NeedDeps | packages.NeedImports
 	pkgLoadConfig.Fset = token.NewFileSet()
 	loadedPkgs = map[string]bool{}
-	neededPkgs = map[string]bool{}
 	pkgs = []*packages.Package{}
 }
 
@@ -239,14 +239,14 @@ func main() {
 	if *inPkgsFlag == "" {
 		die("missing required -pkgs arg\n")
 	}
-	// if *outputFile == "" {
-	// 	die("missing required -out arg\n")
-	// }
+	if *outputDirFlag == "" {
+		die("missing required -out arg\n")
+	}
 
 	targetPkgs = strings.Split(*inPkgsFlag, ",")
 	loadPkgs(targetPkgs...)
 
-	exportedStructs := findExportedStructs()
+	exportedStructs := findExportedStructs(pkgs)
 	toGenerate := map[string][]*typeAttr{}
 
 	for _, es := range exportedStructs {
@@ -258,7 +258,6 @@ func main() {
 			IsStruct:     true,
 			StructFields: []*fieldAttr{},
 		}
-		neededPkgs[es.Pkg.ID] = true
 		if _, ok := toGenerate[es.Pkg.ID]; !ok {
 			toGenerate[es.Pkg.ID] = []*typeAttr{}
 		}
@@ -267,15 +266,9 @@ func main() {
 	}
 
 	for _, ss := range toGenerate {
-		var outDir, outPkg, outFile string
-		if *outputDirFlag != "" {
-			outDir = filepath.Dir(*outputDirFlag)
-			outPkg = filepath.Base(outDir)
-		} else {
-			outDir = filepath.Dir(ss[0].DefiningFile)
-			outPkg = ss[0].PkgName
-		}
-		outFile = ss[0].PkgName + "_fluent.go"
+		outDir := filepath.Dir(*outputDirFlag)
+		outPkg := filepath.Base(outDir)
+		outFile := ss[0].PkgName + "_fluent.go"
 
 		imports := collectImports(ss)
 		pkgKeys = make(map[string]string)
@@ -297,7 +290,6 @@ func main() {
 		}
 
 		for _, s := range ss {
-
 			if err := builderTmplt.Execute(&buff, s); err != nil {
 				die("%v\n", err)
 			}
@@ -337,7 +329,6 @@ func loadPkgs(path ...string) {
 			loadedPkgs[p.ID] = true
 		}
 	}
-
 }
 
 func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) {
@@ -353,10 +344,6 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 				FieldName:  tAttr.TypeName,
 				ValType:    tAttr,
 			})
-
-			if tAttr.PkgPath != "" {
-				neededPkgs[tAttr.PkgPath] = true
-			}
 		} else {
 			for _, n := range f.Names {
 				if isNameExported(n.Name) {
@@ -365,10 +352,6 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 						FieldName:  n.Name,
 						ValType:    tAttr,
 					})
-
-					if tAttr.PkgPath != "" {
-						neededPkgs[tAttr.PkgPath] = true
-					}
 				}
 			}
 		}
@@ -424,54 +407,97 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) bool {
 		}
 	}
 
-	if nt, ok := pkg.TypesInfo.Types[tExpr].Type.(*types.Named); ok {
+	tp := pkg.TypesInfo.Types[tExpr].Type
+	if nt, ok := tp.(*types.Named); ok {
 		tAttr.TypeName = nt.Obj().Name()
-		if !isNameExported(tAttr.TypeName) {
-			return false
-		}
-
 		if nt.Obj().Pkg() != nil {
 			tAttr.PkgPath = nt.Obj().Pkg().Path()
 			tAttr.PkgName = nt.Obj().Pkg().Name()
 			if isInternalPkg(tAttr.PkgPath) {
 				return false
 			}
-
 			if _, ok := loadedPkgs[tAttr.PkgPath]; !ok {
 				loadPkgs(tAttr.PkgPath)
 			}
+		}
+
+		if !isNameExported(tAttr.TypeName) {
+			if it, ok := tp.Underlying().(*types.Interface); ok {
+				tAttr.IsIntf = true
+				tAttr.Implementations = []*typeAttr{}
+
+				implementations := findExportedStructs([]*packages.Package{pkg}, it)
+				for _, sa := range implementations {
+					ita := &typeAttr{
+						TypeName:     sa.StructName,
+						PkgPath:      sa.Pkg.ID,
+						PkgName:      sa.Pkg.Name,
+						DefiningFile: sa.Pkg.Fset.File(sa.TypeSpec.Pos()).Name(),
+						IsPtr:        tAttr.IsPtr,
+						IsStruct:     true,
+					}
+					if fillTypeAttr(sa.Pkg, sa.TypeSpec, ita) {
+						tAttr.Implementations = append(tAttr.Implementations, ita)
+					}
+				}
+				return len(tAttr.Implementations) > 0
+			}
+			return false
 		}
 	}
 
 	return true
 }
 
-func findExportedStructs() []*structAttr {
+func findExportedStructs(pkgs []*packages.Package, ifs ...*types.Interface) []*structAttr {
 	structs := []*structAttr{}
-	for _, pkg := range pkgs {
-		for _, syn := range pkg.Syntax {
-			for _, f := range syn.Decls {
-				gd, ok := f.(*ast.GenDecl)
-				if !ok || gd.Tok != token.TYPE {
+	for _, p := range pkgs {
+	outer:
+		for _, ts := range findStructsInPkg(p) {
+			if st, ok := ts.Type.(*ast.StructType); ok {
+				if !isNameExported(ts.Name.Name) {
 					continue
 				}
 
-				for _, s := range gd.Specs {
-					ts, ok := s.(*ast.TypeSpec)
-					if ok && isNameExported(ts.Name.Name) {
-						if st, ok := ts.Type.(*ast.StructType); ok {
-							structs = append(structs, &structAttr{
-								StructName: ts.Name.Name,
-								Pkg:        pkg,
-								TypeSpec:   st,
-							})
+				for _, i := range ifs {
+					st := p.Types.Scope().Lookup(ts.Name.Name)
+					if st != nil {
+						stPtr := types.NewPointer(st.Type())
+						if !types.Implements(stPtr, i) {
+							continue outer
 						}
+					}
+				}
+
+				structs = append(structs, &structAttr{
+					StructName: ts.Name.Name,
+					Pkg:        p,
+					TypeSpec:   st,
+				})
+			}
+		}
+	}
+	return structs
+}
+
+func findStructsInPkg(pkg *packages.Package) []*ast.TypeSpec {
+	typeSpecs := []*ast.TypeSpec{}
+	for _, syn := range pkg.Syntax {
+		for _, f := range syn.Decls {
+			gd, ok := f.(*ast.GenDecl)
+			if !ok || gd.Tok != token.TYPE {
+				continue
+			}
+			for _, s := range gd.Specs {
+				if ts, ok := s.(*ast.TypeSpec); ok {
+					if _, ok := ts.Type.(*ast.StructType); ok {
+						typeSpecs = append(typeSpecs, ts)
 					}
 				}
 			}
 		}
 	}
-	return structs
+	return typeSpecs
 }
 
 func collectImports(t []*typeAttr) map[string]string {
@@ -511,11 +537,9 @@ func collectRequiredPkgsHelper(t *typeAttr, m *map[string]bool) {
 	if t == nil {
 		return
 	}
-
 	if t.PkgPath != "" {
 		(*m)[t.PkgPath] = true
 	}
-
 	collectRequiredPkgsHelper(t.MapKeyType, m)
 	collectRequiredPkgsHelper(t.MapValType, m)
 	collectRequiredPkgsHelper(t.SliceValType, m)
@@ -527,6 +551,9 @@ func collectRequiredPkgsHelper(t *typeAttr, m *map[string]bool) {
 	}
 	for _, fa := range t.StructFields {
 		collectRequiredPkgsHelper(fa.ValType, m)
+	}
+	for _, ta := range t.Implementations {
+		collectRequiredPkgsHelper(ta, m)
 	}
 }
 
