@@ -46,6 +46,7 @@ type (
 	fieldAttr struct {
 		StructName string
 		FieldName  string
+		FuncSuffix string
 		ValType    *typeAttr
 	}
 
@@ -55,6 +56,23 @@ type (
 		StructName string
 	}
 )
+
+func (f *fieldAttr) getVariations() []*fieldAttr {
+	v := []*fieldAttr{}
+	if f.ValType.IsIntf {
+		for _, ta := range f.ValType.Implementations {
+			v = append(v, &fieldAttr{
+				StructName: f.StructName,
+				FieldName:  f.FieldName,
+				FuncSuffix: "_" + ta.TypeName,
+				ValType:    ta,
+			})
+		}
+	} else {
+		v = append(v, f)
+	}
+	return v
+}
 
 func (t *typeAttr) String() string {
 	s := ""
@@ -144,7 +162,7 @@ func (b *{{ .TypeName }}Builder) Build() *{{ qualifiedName . }} {
 `
 
 	withFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) With{{ .FieldName }}(a {{ .ValType }}) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) With{{ .FieldName }}{{ .FuncSuffix }}(a {{ .ValType }}) *{{ .StructName }}Builder {
 	b.s.{{ .FieldName }} = a
 	return b
 }
@@ -295,8 +313,10 @@ func main() {
 			}
 
 			for _, sf := range s.StructFields {
-				if err := withFuncTmplt.Execute(&buff, sf); err != nil {
-					die("%v\n", err)
+				for _, fa := range sf.getVariations() {
+					if err := withFuncTmplt.Execute(&buff, fa); err != nil {
+						die("%v\n", err)
+					}
 				}
 
 				if sf.ValType.IsSlice {
@@ -424,49 +444,22 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) bool {
 		if !isNameExported(tAttr.TypeName) {
 			if it, ok := tp.Underlying().(*types.Interface); ok {
 				tAttr.IsIntf = true
-				tAttr.Implementations = []*typeAttr{}
-
-				implementations := findExportedStructs([]*packages.Package{pkg}, it)
-				for _, sa := range implementations {
-					ita := &typeAttr{
-						TypeName:     sa.StructName,
-						PkgPath:      sa.Pkg.ID,
-						PkgName:      sa.Pkg.Name,
-						DefiningFile: sa.Pkg.Fset.File(sa.TypeSpec.Pos()).Name(),
-						IsPtr:        tAttr.IsPtr,
-						IsStruct:     true,
-					}
-					if fillTypeAttr(sa.Pkg, sa.TypeSpec, ita) {
-						tAttr.Implementations = append(tAttr.Implementations, ita)
-					}
-				}
+				tAttr.Implementations = findImplementations([]*packages.Package{pkg}, it)
 				return len(tAttr.Implementations) > 0
 			}
 			return false
 		}
 	}
-
 	return true
 }
 
-func findExportedStructs(pkgs []*packages.Package, ifs ...*types.Interface) []*structAttr {
+func findExportedStructs(pkgs []*packages.Package) []*structAttr {
 	structs := []*structAttr{}
 	for _, p := range pkgs {
-	outer:
 		for _, ts := range findStructsInPkg(p) {
 			if st, ok := ts.Type.(*ast.StructType); ok {
 				if !isNameExported(ts.Name.Name) {
 					continue
-				}
-
-				for _, i := range ifs {
-					st := p.Types.Scope().Lookup(ts.Name.Name)
-					if st != nil {
-						stPtr := types.NewPointer(st.Type())
-						if !types.Implements(stPtr, i) {
-							continue outer
-						}
-					}
 				}
 
 				structs = append(structs, &structAttr{
@@ -478,6 +471,44 @@ func findExportedStructs(pkgs []*packages.Package, ifs ...*types.Interface) []*s
 		}
 	}
 	return structs
+}
+
+// ita := &typeAttr{
+// 	TypeName:     sa.StructName,
+// 	PkgPath:      sa.Pkg.ID,
+// 	PkgName:      sa.Pkg.Name,
+// 	DefiningFile: sa.Pkg.Fset.File(sa.TypeSpec.Pos()).Name(),
+// 	IsPtr:        true,
+// 	IsStruct:     true,
+// }
+// if fillTypeAttr(sa.Pkg, sa.TypeSpec, ita) {
+// 	tAttr.Implementations = append(tAttr.Implementations, ita)
+// }
+
+func findImplementations(pkgs []*packages.Package, intf *types.Interface) []*typeAttr {
+	implementations := []*typeAttr{}
+	exportedStructs := findExportedStructs(pkgs)
+	for _, sa := range exportedStructs {
+		st := sa.Pkg.Types.Scope().Lookup(sa.StructName)
+		if st != nil {
+			tattr := &typeAttr{
+				TypeName:     sa.StructName,
+				PkgPath:      sa.Pkg.ID,
+				PkgName:      sa.Pkg.Name,
+				DefiningFile: sa.Pkg.Fset.File(sa.TypeSpec.Pos()).Name(),
+				IsStruct:     true,
+			}
+			fillTypeAttr(sa.Pkg, sa.TypeSpec, tattr)
+
+			if types.Implements(st.Type(), intf) {
+				implementations = append(implementations, tattr)
+			} else if types.Implements(types.NewPointer(st.Type()), intf) {
+				tattr.IsPtr = true
+				implementations = append(implementations, tattr)
+			}
+		}
+	}
+	return implementations
 }
 
 func findStructsInPkg(pkg *packages.Package) []*ast.TypeSpec {
