@@ -294,7 +294,11 @@ func Generate(conf *GeneratorConfig) error {
 	}
 
 	for _, ss := range toGenerate {
-		outDir := filepath.Dir(conf.OutDir)
+		outDir, err := filepath.Abs(conf.OutDir)
+		if err != nil {
+			return err
+		}
+
 		outPkg := filepath.Base(outDir)
 		outFile := ss[0].PkgName + "_fluent.go"
 
