@@ -34,6 +34,7 @@ type (
 		IsStruct        bool
 		IsFunc          bool
 		IsIntf          bool
+		HasBuilder      bool
 		SliceValType    *typeAttr
 		MapKeyType      *typeAttr
 		MapValType      *typeAttr
@@ -102,6 +103,11 @@ func (t *typeAttr) String() string {
 		}
 
 		s += "func(" + params + ")" + "(" + results + ")"
+	} else if t.HasBuilder {
+		if !t.IsPtr {
+			s = "*" + s
+		}
+		s += t.TypeName + "Builder"
 	} else {
 		if t.PkgPath != "" {
 			if pkgPrefix, ok := pkgKeys[t.PkgPath]; ok {
@@ -156,6 +162,13 @@ func New{{ .TypeName }}() *{{ .TypeName }}Builder {
 	return b
 }
 
+func From{{ .TypeName }}(a *{{ qualifiedName . }}) *{{ .TypeName }}Builder {
+	b := &{{ .TypeName }}Builder{
+		s: a,
+	}
+	return b
+}
+
 func (b *{{ .TypeName }}Builder) Build() *{{ qualifiedName . }} {
 	return b.s
 }
@@ -163,7 +176,7 @@ func (b *{{ .TypeName }}Builder) Build() *{{ qualifiedName . }} {
 
 	withFuncTmpltStr = `
 func (b *{{ .StructName }}Builder) With{{ .FieldName }}{{ .FuncSuffix }}(a {{ .ValType }}) *{{ .StructName }}Builder {
-	b.s.{{ .FieldName }} = a
+	b.s.{{ .FieldName }} = a{{ if .ValType.HasBuilder }}.Build(){{ end }}
 	return b
 }
 	`
@@ -281,6 +294,12 @@ func main() {
 		}
 		toGenerate[es.Pkg.ID] = append(toGenerate[es.Pkg.ID], sAttr)
 		fillStructAttr(es.Pkg, es.TypeSpec, sAttr)
+	}
+
+	for _, ss := range toGenerate {
+		for _, s := range ss {
+			fillHasBuilder(s, toGenerate)
+		}
 	}
 
 	for _, ss := range toGenerate {
@@ -529,6 +548,38 @@ func findStructsInPkg(pkg *packages.Package) []*ast.TypeSpec {
 		}
 	}
 	return typeSpecs
+}
+
+func fillHasBuilder(t *typeAttr, m map[string][]*typeAttr) {
+	if t == nil {
+		return
+	}
+
+	if t.IsStruct {
+		for _, ss := range m {
+			for _, ta := range ss {
+				if t.TypeName == ta.TypeName {
+					t.HasBuilder = true
+				}
+			}
+		}
+	}
+
+	fillHasBuilder(t.MapKeyType, m)
+	fillHasBuilder(t.MapValType, m)
+	fillHasBuilder(t.SliceValType, m)
+	for _, ta := range t.FuncParamTypes {
+		fillHasBuilder(ta, m)
+	}
+	for _, ta := range t.FuncResultTypes {
+		fillHasBuilder(ta, m)
+	}
+	for _, fa := range t.StructFields {
+		fillHasBuilder(fa.ValType, m)
+	}
+	for _, ta := range t.Implementations {
+		fillHasBuilder(ta, m)
+	}
 }
 
 func collectImports(t []*typeAttr) map[string]string {
