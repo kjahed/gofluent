@@ -76,23 +76,23 @@ func (f *fieldAttr) getVariations() []*fieldAttr {
 	return v
 }
 
-func (t *typeAttr) String() string {
+func (t *typeAttr) DeclString(useBuilders bool) string {
 	s := ""
 	if t.IsPtr {
 		s += "*"
 	}
 	if t.IsSlice {
 		s += "[]"
-		s += t.SliceValType.String()
+		s += t.SliceValType.DeclString(useBuilders)
 	} else if t.IsMap {
-		s += "map[" + t.MapKeyType.String() + "]" + t.MapValType.String()
+		s += "map[" + t.MapKeyType.DeclString(useBuilders) + "]" + t.MapValType.DeclString(useBuilders)
 	} else if t.IsFunc {
 		params := ""
 		for i, ta := range t.FuncParamTypes {
 			if i > 0 {
 				params += ","
 			}
-			params += ta.String()
+			params += ta.DeclString(useBuilders)
 		}
 
 		results := ""
@@ -100,11 +100,11 @@ func (t *typeAttr) String() string {
 			if i > 0 {
 				results += ","
 			}
-			results += ta.String()
+			results += ta.DeclString(useBuilders)
 		}
 
 		s += "func(" + params + ")" + "(" + results + ")"
-	} else if t.HasBuilder {
+	} else if useBuilders && t.HasBuilder {
 		if !t.IsPtr {
 			s = "*" + s
 		}
@@ -118,6 +118,10 @@ func (t *typeAttr) String() string {
 		s += t.TypeName
 	}
 	return s
+}
+
+func (t *typeAttr) String() string {
+	return t.DeclString(false)
 }
 
 func (t *typeAttr) InitString() string {
@@ -176,21 +180,27 @@ func (b *{{ .TypeName }}Builder) Build() *{{ qualifiedName . }} {
 `
 
 	withFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) With{{ .FieldName }}{{ .FuncSuffix }}(a {{ .ValType }}) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) With{{ .FieldName }}{{ .FuncSuffix }}(a {{ typeDecl .ValType }}) *{{ .StructName }}Builder {
+	{{- if .ValType.IsSlice}}
+	for _, x := range a {
+		b.s.{{ .FieldName }} = append(b.s.{{ .FieldName }}, x{{ if .ValType.SliceValType.HasBuilder }}.Build(){{ end }})
+	}
+	{{- else }}
 	b.s.{{ .FieldName }} = a{{ if .ValType.HasBuilder }}.Build(){{ end }}
+	{{- end }}
 	return b
 }
 	`
 
 	addFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) Add{{ .FieldName }}(a {{ .ValType.SliceValType }}) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) Add{{ .FieldName }}(a {{ typeDecl .ValType.SliceValType }}) *{{ .StructName }}Builder {
 	b.s.{{ .FieldName }} = append(b.s.{{ .FieldName }}, a{{ if .ValType.SliceValType.HasBuilder }}.Build(){{ end }})
 	return b
 }
 	`
 
 	putFuncTmpltStr = `
-func (b *{{ .StructName }}Builder) Put{{ .FieldName }}(k {{ .ValType.MapKeyType }}, v {{ .ValType.MapValType }}) *{{ .StructName }}Builder {
+func (b *{{ .StructName }}Builder) Put{{ .FieldName }}(k {{ typeDecl .ValType.MapKeyType }}, v {{ typeDecl .ValType.MapValType }}) *{{ .StructName }}Builder {
 	b.s.{{ .FieldName }}[k{{ if .ValType.MapKeyType.HasBuilder }}.Build(){{ end }}] = v{{ if .ValType.MapValType.HasBuilder }}.Build(){{ end }}
 	return b
 }
@@ -214,14 +224,12 @@ var (
 func init() {
 	var err error
 
-	preambleTmplt, err = template.New("preambleTmplt").Parse(preambleTmpltStr)
-	if err != nil {
-		panic(err)
-	}
-
-	builderTmplt, err = template.New("builderTmplt").Funcs(template.FuncMap{
+	funcMap := template.FuncMap{
 		"typeInit": func(t *typeAttr) string {
 			return t.InitString()
+		},
+		"typeDecl": func(t *typeAttr) string {
+			return t.DeclString(true)
 		},
 		"qualifiedName": func(t *typeAttr) string {
 			if k, ok := pkgKeys[t.PkgPath]; ok {
@@ -229,28 +237,35 @@ func init() {
 			}
 			return t.TypeName
 		},
-	}).Parse(builderTmpltStr)
+	}
+
+	preambleTmplt, err = template.New("preambleTmplt").Parse(preambleTmpltStr)
 	if err != nil {
 		panic(err)
 	}
 
-	withFuncTmplt, err = template.New("withFuncTmplt").Parse(withFuncTmpltStr)
+	builderTmplt, err = template.New("builderTmplt").Funcs(funcMap).Parse(builderTmpltStr)
 	if err != nil {
 		panic(err)
 	}
 
-	addFuncTmplt, err = template.New("addFuncTmplt").Parse(addFuncTmpltStr)
+	withFuncTmplt, err = template.New("withFuncTmplt").Funcs(funcMap).Parse(withFuncTmpltStr)
 	if err != nil {
 		panic(err)
 	}
 
-	putFuncTmplt, err = template.New("putFuncTmplt").Parse(putFuncTmpltStr)
+	addFuncTmplt, err = template.New("addFuncTmplt").Funcs(funcMap).Parse(addFuncTmpltStr)
+	if err != nil {
+		panic(err)
+	}
+
+	putFuncTmplt, err = template.New("putFuncTmplt").Funcs(funcMap).Parse(putFuncTmpltStr)
 	if err != nil {
 		panic(err)
 	}
 
 	pkgLoadConfig = new(packages.Config)
-	pkgLoadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesSizes | packages.NeedTypesInfo | packages.NeedName | packages.NeedDeps | packages.NeedImports
+	pkgLoadConfig.Mode = packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedName
 	pkgLoadConfig.Fset = token.NewFileSet()
 	loadedPkgs = map[string]bool{}
 	pkgs = []*packages.Package{}
@@ -371,9 +386,11 @@ func fillStructAttr(pkg *packages.Package, st *ast.StructType, sAttr *typeAttr) 
 	for _, f := range st.Fields.List {
 		tAttr := &typeAttr{}
 		if ok, err := fillTypeAttr(pkg, f.Type, tAttr); !ok || err != nil {
-			return err
+			if err != nil {
+				return err
+			}
+			continue
 		}
-
 		if len(f.Names) == 0 {
 			sAttr.StructFields = append(sAttr.StructFields, &fieldAttr{
 				StructName: sAttr.TypeName,
@@ -467,6 +484,8 @@ func fillTypeAttr(pkg *packages.Package, tExpr ast.Expr, tAttr *typeAttr) (bool,
 				return len(tAttr.Implementations) > 0, nil
 			}
 			return false, nil
+		} else {
+			tAttr.IsStruct = true
 		}
 	}
 	return true, nil
@@ -491,18 +510,6 @@ func findExportedStructs(pkgs []*packages.Package) []*structAttr {
 	}
 	return structs
 }
-
-// ita := &typeAttr{
-// 	TypeName:     sa.StructName,
-// 	PkgPath:      sa.Pkg.ID,
-// 	PkgName:      sa.Pkg.Name,
-// 	DefiningFile: sa.Pkg.Fset.File(sa.TypeSpec.Pos()).Name(),
-// 	IsPtr:        true,
-// 	IsStruct:     true,
-// }
-// if fillTypeAttr(sa.Pkg, sa.TypeSpec, ita) {
-// 	tAttr.Implementations = append(tAttr.Implementations, ita)
-// }
 
 func findImplementations(pkgs []*packages.Package, intf *types.Interface) []*typeAttr {
 	implementations := []*typeAttr{}
@@ -556,10 +563,12 @@ func fillHasBuilder(t *typeAttr, m map[string][]*typeAttr) {
 	}
 
 	if t.IsStruct {
+	outer:
 		for _, ss := range m {
 			for _, ta := range ss {
 				if t.TypeName == ta.TypeName {
 					t.HasBuilder = true
+					break outer
 				}
 			}
 		}
